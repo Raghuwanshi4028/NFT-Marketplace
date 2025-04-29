@@ -1,181 +1,76 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+/// @notice Relist a newly purchased NFT
+function relistNFT(address nftAddress, uint256 tokenId, uint256 price) external {
+    require(price > 0, "Price must be greater than zero");
 
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+    IERC721 nft = IERC721(nftAddress);
+    require(nft.ownerOf(tokenId) == msg.sender, "You are not the owner");
 
-contract NFTMarketplace is Ownable {
-    struct Listing {
-        address seller;
-        address nftAddress;
-        uint256 tokenId;
-        uint256 price;
-        bool paused;
-    }
+    nft.transferFrom(msg.sender, address(this), tokenId);
 
-    mapping(uint256 => Listing) public listings;
-    uint256 public listingCounter;
-    uint256 public marketplaceFeePercent = 2; // e.g., 2%
+    listings[listingCounter] = Listing(msg.sender, nftAddress, tokenId, price, false);
+    emit Listed(listingCounter, msg.sender, nftAddress, tokenId, price);
+    listingCounter++;
+}
+/// @notice Update the NFT address or tokenId of a listing
+function updateNFTDetails(uint256 listingId, address newNftAddress, uint256 newTokenId) external {
+    Listing storage item = listings[listingId];
+    require(item.seller != address(0), "Listing does not exist");
+    require(item.seller == msg.sender, "Not your listing");
 
-    event Listed(uint256 listingId, address seller, address nftAddress, uint256 tokenId, uint256 price);
-    event Purchased(uint256 listingId, address buyer);
-    event Cancelled(uint256 listingId);
-    event PriceUpdated(uint256 listingId, uint256 newPrice);
-    event ListingPaused(uint256 listingId, bool isPaused);
-    event FeeUpdated(uint256 newFeePercent);
+    IERC721(item.nftAddress).transferFrom(address(this), msg.sender, item.tokenId); // return old NFT
+    IERC721(newNftAddress).transferFrom(msg.sender, address(this), newTokenId); // bring new NFT
 
-    constructor() Ownable(msg.sender) {}
+    item.nftAddress = newNftAddress;
+    item.tokenId = newTokenId;
+}
+bool public marketplacePaused = false;
 
-    function listNFT(address nftAddress, uint256 tokenId, uint256 price) external {
-        require(price > 0, "Price must be greater than zero");
+modifier whenNotPaused() {
+    require(!marketplacePaused, "Marketplace is paused");
+    _;
+}
 
-        IERC721(nftAddress).transferFrom(msg.sender, address(this), tokenId);
+function toggleMarketplacePause() external onlyOwner {
+    marketplacePaused = !marketplacePaused;
+}
+function listNFT(address nftAddress, uint256 tokenId, uint256 price) external whenNotPaused {
+    ...
+}
 
-        listings[listingCounter] = Listing(msg.sender, nftAddress, tokenId, price, false);
-        emit Listed(listingCounter, msg.sender, nftAddress, tokenId, price);
-        listingCounter++;
-    }
+function buyNFT(uint256 listingId) external payable whenNotPaused {
+    ...
+}
+struct Offer {
+    address offerer;
+    uint256 offerPrice;
+}
 
-    function buyNFT(uint256 listingId) external payable {
-        Listing memory item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-        require(!item.paused, "Listing is paused");
-        require(msg.value == item.price, "Incorrect ETH sent");
+mapping(uint256 => Offer[]) public offers; // listingId => offers
 
-        uint256 fee = (msg.value * marketplaceFeePercent) / 100;
-        uint256 sellerProceeds = msg.value - fee;
+/// @notice Make an offer for an NFT
+function makeOffer(uint256 listingId) external payable {
+    Listing memory item = listings[listingId];
+    require(item.seller != address(0), "Listing does not exist");
+    require(!item.paused, "Listing paused");
+    require(msg.value > 0, "Offer must be greater than 0");
 
-        payable(item.seller).transfer(sellerProceeds);
-        IERC721(item.nftAddress).transferFrom(address(this), msg.sender, item.tokenId);
+    offers[listingId].push(Offer(msg.sender, msg.value));
+}
 
-        delete listings[listingId];
-        emit Purchased(listingId, msg.sender);
-    }
+/// @notice Seller can accept an offer
+function acceptOffer(uint256 listingId, uint256 offerIndex) external {
+    Listing memory item = listings[listingId];
+    require(item.seller == msg.sender, "Not your listing");
 
-    function cancelListing(uint256 listingId) external {
-        Listing memory item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-        require(item.seller == msg.sender, "Not your listing");
+    Offer memory chosenOffer = offers[listingId][offerIndex];
 
-        IERC721(item.nftAddress).transferFrom(address(this), msg.sender, item.tokenId);
-        delete listings[listingId];
-        emit Cancelled(listingId);
-    }
+    uint256 fee = (chosenOffer.offerPrice * marketplaceFeePercent) / 100;
+    uint256 sellerProceeds = chosenOffer.offerPrice - fee;
 
-    function getListing(uint256 listingId) external view returns (Listing memory) {
-        return listings[listingId];
-    }
+    payable(item.seller).transfer(sellerProceeds);
+    IERC721(item.nftAddress).transferFrom(address(this), chosenOffer.offerer, item.tokenId);
 
-    function getAllListings() external view returns (Listing[] memory) {
-        Listing[] memory all = new Listing[](listingCounter);
-        for (uint256 i = 0; i < listingCounter; i++) {
-            all[i] = listings[i];
-        }
-        return all;
-    }
-
-    function updateListingPrice(uint256 listingId, uint256 newPrice) external {
-        Listing storage item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-        require(item.seller == msg.sender, "Not your listing");
-        require(newPrice > 0, "Price must be greater than zero");
-
-        item.price = newPrice;
-        emit PriceUpdated(listingId, newPrice);
-    }
-
-    function isListed(uint256 listingId) public view returns (bool) {
-        return listings[listingId].seller != address(0);
-    }
-
-    function getActiveListings() external view returns (Listing[] memory) {
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < listingCounter; i++) {
-            if (listings[i].seller != address(0) && !listings[i].paused) {
-                activeCount++;
-            }
-        }
-
-        Listing[] memory activeListings = new Listing[](activeCount);
-        uint256 index = 0;
-        for (uint256 i = 0; i < listingCounter; i++) {
-            if (listings[i].seller != address(0) && !listings[i].paused) {
-                activeListings[index] = listings[i];
-                index++;
-            }
-        }
-        return activeListings;
-    }
-
-    function withdrawNFT(uint256 listingId) external {
-        Listing memory item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-        require(item.seller == msg.sender, "Not your listing");
-
-        IERC721(item.nftAddress).transferFrom(address(this), msg.sender, item.tokenId);
-        delete listings[listingId];
-        emit Cancelled(listingId);
-    }
-
-    /// @notice Pause/unpause a listing
-    function togglePauseListing(uint256 listingId) external {
-        Listing storage item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-        require(item.seller == msg.sender, "Not your listing");
-
-        item.paused = !item.paused;
-        emit ListingPaused(listingId, item.paused);
-    }
-
-    /// @notice Bulk purchase multiple NFTs
-    function bulkBuyNFTs(uint256[] calldata listingIds) external payable {
-        uint256 totalPrice = 0;
-
-        // First pass: calculate total
-        for (uint256 i = 0; i < listingIds.length; i++) {
-            Listing memory item = listings[listingIds[i]];
-            require(item.seller != address(0), "Listing does not exist");
-            require(!item.paused, "Listing is paused");
-            totalPrice += item.price;
-        }
-
-        require(msg.value == totalPrice, "Incorrect ETH sent for bulk purchase");
-
-        // Second pass: transfer NFTs
-        for (uint256 i = 0; i < listingIds.length; i++) {
-            Listing memory item = listings[listingIds[i]];
-
-            uint256 fee = (item.price * marketplaceFeePercent) / 100;
-            uint256 sellerProceeds = item.price - fee;
-
-            payable(item.seller).transfer(sellerProceeds);
-            IERC721(item.nftAddress).transferFrom(address(this), msg.sender, item.tokenId);
-
-            delete listings[listingIds[i]];
-            emit Purchased(listingIds[i], msg.sender);
-        }
-    }
-
-    /// @notice Owner can update the marketplace fee
-    function updateMarketplaceFee(uint256 newFeePercent) external onlyOwner {
-        require(newFeePercent <= 10, "Fee too high"); // e.g., Max 10%
-        marketplaceFeePercent = newFeePercent;
-        emit FeeUpdated(newFeePercent);
-    }
-
-    /// @notice Owner can withdraw collected marketplace fees
-    function withdrawFees(address payable recipient) external onlyOwner {
-        require(address(this).balance > 0, "No fees to withdraw");
-        recipient.transfer(address(this).balance);
-    }
-
-    /// @notice Emergency delist an NFT (onlyOwner)
-    function emergencyDelist(uint256 listingId) external onlyOwner {
-        Listing memory item = listings[listingId];
-        require(item.seller != address(0), "Listing does not exist");
-
-        IERC721(item.nftAddress).transferFrom(address(this), item.seller, item.tokenId);
-        delete listings[listingId];
-        emit Cancelled(listingId);
-    }
+    delete listings[listingId];
+    delete offers[listingId]; // remove all offers after sale
+    emit Purchased(listingId, chosenOffer.offerer);
 }
